@@ -1,0 +1,826 @@
+---
+title: "project 1"
+author: "Mo (Miya) Yang"
+date: "9/19/2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Project 1
+
+## Part 0: prepare for the project
+###load the library
+```{r load libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidytext)
+library(DT)
+library(NLP)
+library(tm)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(textdata)
+library(tidyr)
+library(wordcloud)
+library(RColorBrewer)
+library(plotly)
+library(scales)
+library(wordcloud2)
+library(gridExtra)
+library(ngram)
+library(shiny) 
+library(tidyverse)
+library(tidytext)
+library(plotly)
+```
+
+### import & merge data
+I used left_join to merge these two database, the lyrics as the primary table, and choose the colum of artist as the primary key, as the result, every records of songs have the information of the artists.
+```{r warning=FALSE, message=FALSE}
+song <- read.csv("lyrics.csv")
+art <- read.csv("artists.csv")
+data <- dplyr::left_join(song,art,by = c("artist" = "Artist"))
+```
+
+### transfer data
+I deleted some outliner of the database, since it obvious writes the wrong year. I calculated how many people in the band or just only on singer.
+```{r }
+# transfer year to decade (1968 to 60s)
+data$time <- data$year %/% 10 
+data$time <- data$time *10 
+which(data$time == 110)
+which(data$time == 700)
+data <- data[-91140,]
+data <- data[-64364,]
+# how many people in the group
+data$num_of_ppl <- (str_count(string = data$Members, pattern = ","))+1
+```
+
+### describe data
+We could have a glance of data, and know the information of every colum.
+```{r}
+str(data)
+summary(str_count(string = data$lyrics,pattern = '\\S+'))
+```
+
+## Part 1: clean data
+### clean the part of lyrics
+I cleand the text by converting all the letters to the lower case, and removing punctuation, numbers, empty words and extra white space. Then I stemd the words here and then convert the "tm" object to a "tidy" object for much faster processing. Created a dictionary to look up the words corresponding to the stems, and combined the stems and the dictionary into the same "tidy" object. Then, completed the stems by picking the corresponding word with the highest frequency. Last, I pasted the words together to form processed lyrics.
+```{r}
+### function for removimg leading and trailing whitespace from character strings 
+leadingWhitespace <- content_transformer(function(x) str_trim(x, side = "both"))
+
+### remove stop words
+data("stop_words")
+word <- c("lot", "today", "months", "month", "wanna", "wouldnt", "wasnt", "ha", "na", "ooh", "da",
+          "gonna", "im", "dont", "aint", "wont", "yeah", "la", "oi", "nigga", "fuck",
+          "hey", "year", "years", "last", "past", "feel")
+stop_words <- c(stop_words$word, word)
+
+### clean the data and make a corpus
+corpus <- VCorpus(VectorSource(data$lyrics))%>%
+  tm_map(content_transformer(tolower))%>%
+  tm_map(removePunctuation)%>%
+  tm_map(removeWords, character(0))%>%
+  tm_map(removeWords, stop_words)%>%
+  tm_map(removeNumbers)%>%
+  tm_map(stripWhitespace)%>%
+  tm_map(leadingWhitespace)
+
+### stemming words
+stemmed <- tm_map(corpus, stemDocument) %>%
+  tidy() %>%
+  select(text)
+
+### creating tidy format of the dictionary to be used for completing stems
+dict <- tidy(corpus) %>%
+  select(text) %>%
+  unnest_tokens(dictionary, text)
+
+### combining stems and dictionary into the same tibble
+completed <- stemmed %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(stems, text) %>%
+  bind_cols(dict) 
+
+### stem completion
+completed <- completed %>%
+  group_by(stems) %>%
+  count(dictionary) %>%
+  mutate(word = dictionary[which.max(n)]) %>%
+  ungroup() %>%
+  select(stems, word) %>%
+  distinct() %>%
+  right_join(completed) %>%
+  select(-stems)
+
+### pasting stem completed individual words into their respective lyrics
+completed <- completed %>%
+  group_by(id) %>%
+  summarise(stemmedwords= str_c(word, collapse = " ")) %>%
+  ungroup()
+
+### keeping a track of the processed lyrics with their own ID
+data <- data %>%
+  mutate(id = row_number()) %>%
+  inner_join(completed)
+```
+
+###clean the name of songs:
+Since there are lot of symbol of "-" is the name fo song, it is not good for the further analysis, I remove them.
+```{r}
+# remove "-" in the name of the song
+data$song <- gsub("[[:punct:]]", " ", data$song)
+```
+
+## Part 2: exploratory data analysis (EDA)
+### Sentiment Analysis
+#### Bing Lexicon
+There are a number of word lexicons that can be used to classify words as being positive or negative. The bing lexicon categorizes words as being positive and negative. 
+
+##### Analysis by Lyrics
+```{r}
+# summary of lyrics
+data %>%
+  select(id,stemmedwords)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+We could find out, all those lyrics of songs are much  more negative then positive, I am wondering if there will be the lyrics of one type, one time, or some person that will more positive? let's go further.
+
+```{r}
+# group by genre of lyrics
+data %>%
+  select(id,stemmedwords,genre)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(genre,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+```{r}
+data %>%
+  select(id,stemmedwords,genre)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(genre,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))%>%
+  ggplot(aes(x=genre,y=proportion,fill=sentiment))+geom_col()
+```
+It seems like Hip-Hop and Matal are the top 2 negative, it is obviously. However, Jazz is the most positive genre.
+
+```{r}
+# group by time of lyrics
+data %>%
+  select(id,stemmedwords,time)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(time,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+```{r}
+data %>%
+  select(id,stemmedwords,time)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(time,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))%>%
+  ggplot(aes(x=time,y=proportion,fill=sentiment))+geom_col()
+```
+Since 1960s only have one song, so we could ignore it. Time passing, it has a trend of lyrice are increasing negetive slight.
+
+```{r}
+# group by member of lyrics
+data %>%
+  select(id,stemmedwords,num_of_ppl)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(num_of_ppl,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+```{r}
+data %>%
+  select(id,stemmedwords,num_of_ppl)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(num_of_ppl,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))%>%
+  ggplot(aes(x=num_of_ppl,y=proportion,fill=sentiment))+geom_col()
+```
+It has balance of each number of member in the group, except the one group of 20, and it may has only one artist who really like positive words.
+
+```{r}
+# group by artist of lyrics
+data %>%
+  select(id,stemmedwords,artist)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(artist,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+```{r}
+data %>%
+  select(id,stemmedwords,artist)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=stemmedwords)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(artist,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))%>%
+  ggplot(aes(x=artist,y=proportion,fill=sentiment))+geom_col()
+```
+It has a huge different sentiment of different artist, which is good, that will make music diversification.
+
+##### Analysis by name of songs
+```{r}
+# summary of song's name
+data %>%
+  select(id,song)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+
+```{r}
+# group by genre of song's name
+data %>%
+  select(id,song,genre)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(genre,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+```{r}
+data %>%
+  select(id,song,genre)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(genre,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))%>%
+  ggplot(aes(x=genre,y=proportion,fill=sentiment))+geom_col()
+```
+The name of the different genre of songs is similar like the lyrics. But the name of Hip-Hop has more positive name than lyrics.
+
+```{r}
+# group by time of song's name
+data %>%
+  select(id,song,time)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(time,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+
+```{r}
+data %>%
+  select(id,song,time)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(time,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))%>%
+  ggplot(aes(x=time,y=proportion,fill=sentiment))+geom_col()
+```
+It uses the most postive name in 70s, however, it does not have to much change after those years.
+
+```{r}
+# group by member of song's name
+data %>%
+  select(id,song,num_of_ppl)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(num_of_ppl,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+
+```{r}
+data %>%
+  select(id,song,num_of_ppl)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(num_of_ppl,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))%>%
+  ggplot(aes(x=num_of_ppl,y=proportion,fill=sentiment))+geom_col()
+```
+The more people they have, the more difference they may have.
+
+```{r}
+# group by artist of song's name
+data %>%
+  select(id,song,artist)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(artist,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+```
+
+```{r}
+data %>%
+  select(id,song,artist)%>%
+  group_by(id)%>%
+  unnest_tokens(output=word,input=song)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(artist,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))%>%
+  ggplot(aes(x=artist,y=proportion,fill=sentiment))+geom_col()
+```
+Same like the lyrics, there are huge different perference of each artists.
+
+#### nrc lexicon
+A word may reflect more than just valence. The 'nrc' lexicon categorizes words by emotion.   
+
+```{r}
+# summary of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(sentiment)%>%
+  count()
+```
+```{r}
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(sentiment)%>%
+  count()%>%
+  ggplot(aes(x=reorder(sentiment,X = n),y=n,fill=sentiment))+geom_col()+guides(fill=F)+coord_flip()
+```
+The positive and negative are the most common emotion in the lyrics.
+
+```{r}
+# summary of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(sentiment)%>%
+  count()
+```
+```{r}
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(sentiment)%>%
+  count()%>%
+  ggplot(aes(x=reorder(sentiment,X = n),y=n,fill=sentiment))+geom_col()+guides(fill=F)+coord_flip()
+```
+It is same as the lyrics.
+
+##### rating of all lyrics based on emotion expressed
+
+###### Analysis by lyrics
+```{r}
+# group by genre of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,genre)%>%
+  count()%>%
+  group_by(sentiment, genre)%>%
+  summarize(n = mean(n))%>%
+  data.frame()
+```
+
+```{r}
+# group by time of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,time)%>%
+  count()%>%
+  group_by(sentiment, time)%>%
+  summarize(n = mean(n))%>%
+  data.frame()
+```
+
+```{r}
+# group by num_of_ppl of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,num_of_ppl)%>%
+  count()%>%
+  group_by(sentiment, num_of_ppl)%>%
+  summarize(n = mean(n))%>%
+  data.frame()
+```
+
+```{r}
+# group by artist of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,artist)%>%
+  count()%>%
+  group_by(sentiment, artist)%>%
+  summarize(n = mean(n))%>%
+  data.frame()
+```
+
+Analysis by name of songs
+```{r}
+# group by genre of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,genre)%>%
+  count()%>%
+  group_by(sentiment, genre)%>%
+  summarize(n = mean(n))%>%
+  data.frame()
+```
+
+```{r}
+# group by time of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,time)%>%
+  count()%>%
+  group_by(sentiment, time)%>%
+  summarize(n = mean(n))%>%
+  data.frame()
+```
+
+```{r}
+# group by num_of_ppl of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,num_of_ppl)%>%
+  count()%>%
+  group_by(sentiment, num_of_ppl)%>%
+  summarize(n = mean(n))%>%
+  data.frame()
+```
+
+```{r}
+# group by artist of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,artist)%>%
+  count()%>%
+  group_by(sentiment, artist)%>%
+  summarize(n = mean(n))%>%
+  data.frame()
+```
+
+visualization of rating
+Analysis by lyrics
+```{r}
+# group by genre of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,genre)%>%
+  count()%>%
+  group_by(sentiment, genre)%>%
+  summarize(n = mean(n))%>%
+  ungroup()%>%
+  ggplot(aes(x=genre,y=n,fill=genre))+
+  geom_col()+
+  facet_wrap(~sentiment)+
+  guides(fill=F)+coord_flip()
+```
+We could niticed that, Hip-Hop has more strong emotion beyond the others.
+
+```{r}
+# group by time of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,time)%>%
+  count()%>%
+  group_by(sentiment, time)%>%
+  summarize(n = mean(n))%>%
+  ungroup()%>%
+  ggplot(aes(x=time,y=n,fill=time))+
+  geom_col()+
+  facet_wrap(~sentiment)+
+  guides(fill=F)+coord_flip()
+```
+There is no a huge different in different time.
+
+```{r}
+# group by member of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,num_of_ppl)%>%
+  count()%>%
+  group_by(sentiment, num_of_ppl)%>%
+  summarize(n = mean(n))%>%
+  ungroup()%>%
+  ggplot(aes(x=num_of_ppl,y=n,fill=num_of_ppl))+
+  geom_col()+
+  facet_wrap(~sentiment)+
+  guides(fill=F)+coord_flip()
+```
+Same like above, there are some artist are really like positive words, it make that seems like anomaly data.
+
+```{r}
+# group by artist of lyrics
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = stemmedwords)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,artist)%>%
+  count()%>%
+  group_by(sentiment, artist)%>%
+  summarize(n = mean(n))%>%
+  ungroup()%>%
+  ggplot(aes(x=artist,y=n,fill=artist))+
+  geom_col()+
+  facet_wrap(~sentiment)+
+  guides(fill=F)+coord_flip()
+```
+It has a huge diverse of those artists.
+
+##### Analysis by name of songs
+For all the name of songs, there is not a huge different of different type, number of people,and time. Maybe the song's name are too short, it has some influence on this.
+```{r}
+# group by genre of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,genre)%>%
+  count()%>%
+  group_by(sentiment, genre)%>%
+  summarize(n = mean(n))%>%
+  ungroup()%>%
+  ggplot(aes(x=genre,y=n,fill=genre))+
+  geom_col()+
+  facet_wrap(~sentiment)+
+  guides(fill=F)+coord_flip()
+```
+
+```{r}
+# group by time of lyrics of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,time)%>%
+  count()%>%
+  group_by(sentiment, time)%>%
+  summarize(n = mean(n))%>%
+  ungroup()%>%
+  ggplot(aes(x=time,y=n,fill=time))+
+  geom_col()+
+  facet_wrap(~sentiment)+
+  guides(fill=F)+coord_flip()
+```
+
+```{r}
+# group by member of lyrics of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,num_of_ppl)%>%
+  count()%>%
+  group_by(sentiment, num_of_ppl)%>%
+  summarize(n = mean(n))%>%
+  ungroup()%>%
+  ggplot(aes(x=num_of_ppl,y=n,fill=num_of_ppl))+
+  geom_col()+
+  facet_wrap(~sentiment)+
+  guides(fill=F)+coord_flip()
+```
+
+```{r}
+# group by artist of lyrics of song's name
+data%>%
+  group_by(id)%>%
+  unnest_tokens(output = word, input = song)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(id,sentiment,artist)%>%
+  count()%>%
+  group_by(sentiment, artist)%>%
+  summarize(n = mean(n))%>%
+  ungroup()%>%
+  ggplot(aes(x=artist,y=n,fill=artist))+
+  geom_col()+
+  facet_wrap(~sentiment)+
+  guides(fill=F)+coord_flip()
+```
+
+
+## Part 3: visualization: Rshiny
+first, we need to create some downdrop list to Rshiny user could choose what they want to search. I choose 3 features, the genre of the songs, the time of the songs, and how many people to sing this songs.
+```{r}
+lyrics_list <- c("Folk", "R&B", "Electronic", "Jazz", "Indie", "Country", "Rock", "Metal", "Pop", "Hip-Hop", "Other")
+time_list <- c("1970s", "1980s", "1990s", "2000s", "2010s")
+num_of_ppl_list <- c("1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","20","21","26","28","39","44")
+corpus <- VCorpus(VectorSource(data$stemmedwords))
+word_tibble <- tidy(corpus) %>%
+  select(text) %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(word, text)
+```
+
+Sencondly, we need to  built the UI, the first page of the shiny app, it shows different kinds of genre and people of this songs, which is the most common words they will use, the user could  choose the top 1 to top 100 words, and the top 50 is default. We also need Time Variation to show the different time the preference has change or not. And we have some index to make sure there are the right inputs and outputs.
+```{r}
+# Define UI for app that draws a histogram ----
+ui <- navbarPage(strong("Lyrics Analysis"),
+                 tabPanel("Overview",
+                          titlePanel("Most frequent words"),
+                          # Sidebar layout with input and output definitions ----
+                          sidebarLayout(
+                            # Sidebar panel for inputs ----
+                            sidebarPanel(
+                              sliderInput(inputId = "nwords1",
+                                          label = "Number of terms in the first word cloud:",
+                                          min = 5, max = 100, value = 50),
+                              selectInput('genre1', 'Genre of word cloud', 
+                                          lyrics_list, selected='Folk')
+                              
+                            ),
+                            # Main panel for displaying outputs ----
+                            mainPanel(
+                              wordcloud2Output(outputId = "WC1", height = "300")
+                            )
+                          ),
+                          hr(),
+                          sidebarLayout(
+                            # Sidebar panel for inputs ----
+                            sidebarPanel(
+                              sliderInput(inputId = "nwords2",
+                                          label = "Number of terms in the second word cloud:",
+                                          min = 5, max = 100, value = 50),
+                              selectInput('num_of_ppl1', 'num_of_ppl of word cloud', 
+                                          num_of_ppl_list, selected='1')
+                            ),
+                            # Main panel for displaying outputs ----
+                            mainPanel(
+                              wordcloud2Output(outputId = "WC2", height = "300")
+                            )
+                          )
+                 ),
+                 tabPanel("Time Variation",
+                          # Sidebar layout with input and output definitions ----
+                          sidebarLayout(
+                            # Sidebar panel for inputs ----
+                            sidebarPanel(
+                              selectInput('decade1', 'Selected decade for the first plot:', 
+                                          time_list, selected='1970s'),
+                              selectInput('decade2', 'Selected decade for the second plot:', 
+                                          time_list, selected='1980s'),
+                              numericInput(inputId = "topBigrams",
+                                           label = "Number of top pairs to view:",
+                                           min = 1,
+                                           max = 20,
+                                           value = 10)
+                              
+                            ),
+                            # Main panel for displaying outputs ----
+                            mainPanel(
+                              fluidRow(
+                                column(5,
+                                       plotlyOutput("bigram1")),
+                                column(5,
+                                       plotlyOutput("bigram2"))
+                              )
+                            )
+                          )
+                 ),
+                 tabPanel("Data", 
+                          DT::dataTableOutput("table"))
+)
+```
+
+Then we need to built the server of Rshiny, it shows more details of Rshiny: like tell the machine how to filter the data, and the what will be output.
+```{r}
+server <- function(input, output) {
+  output$WC1 <- renderWordcloud2({
+    count(filter(word_tibble, id %in% which(data$genre == input$genre1)), word, sort = TRUE) %>%
+      slice(1:input$nwords1) %>%
+      wordcloud2(size=0.6, rotateRatio=0.2)
+  })
+  output$WC2 <- renderWordcloud2({
+    count(filter(word_tibble, id %in% which(data$num_of_ppl == input$num_of_ppl1)), word, sort = TRUE) %>%
+      slice(1:input$nwords2) %>%
+      wordcloud2(size=0.6, rotateRatio=0.2)
+  })
+  output$bigram1 <- renderPlotly({
+    year_start <- as.integer(substr(input$decade1, 1, 4))
+    dt_sub <- filter(data, year>=year_start) %>%
+      filter(year<(year_start+10))
+    lyric_bigrams <- dt_sub %>%
+      unnest_tokens(bigram, stemmedwords, token = "ngrams", n = 2)
+    bigram_counts <- lyric_bigrams %>%
+      separate(bigram, c("word1", "word2"), sep = " ") %>%
+      count(word1, word2, sort = TRUE)
+    combined_words <- apply(bigram_counts[c(1, 2)], 1, paste , collapse = " " )[1:input$topBigrams]
+    x_names <- factor(combined_words, levels = rev(combined_words))
+    plot_ly(
+      x = bigram_counts$n[1:input$topBigrams],
+      y = x_names,
+      name = "Bigram",
+      type = "bar",
+      orientation = 'h'
+    )
+  })
+  output$bigram2 <- renderPlotly({
+    year_start <- as.integer(substr(input$decade2, 1, 4))
+    dt_sub <- filter(data, year>=year_start) %>%
+      filter(year<(year_start+10))
+    lyric_bigrams <- dt_sub %>%
+      unnest_tokens(bigram, stemmedwords, token = "ngrams", n = 2)
+    bigram_counts <- lyric_bigrams %>%
+      separate(bigram, c("word1", "word2"), sep = " ") %>%
+      count(word1, word2, sort = TRUE)
+    combined_words <- apply(bigram_counts[c(1, 2)], 1, paste , collapse = " " )[1:input$topBigrams]
+    x_names <- factor(combined_words, levels = rev(combined_words))
+    plot_ly(
+      x = bigram_counts$n[1:input$topBigrams],
+      y = x_names,
+      name = "Bigram",
+      type = "bar",
+      orientation = 'h'
+    )
+  })
+  output$table <- DT::renderDataTable({
+    DT::datatable(data)
+  })
+}
+```
+
+Finally, we could run Rshiny to quickly explore the data.
+```{r eval=FALSE}
+shinyApp(ui, server)
+```
+
